@@ -1,0 +1,22 @@
+[
+  {
+    "qid": "q1",
+    "question": "2026 年 LLM Agent 的记忆方案有哪些主流路线？"
+  },
+  {
+    "qid": "q2",
+    "question": "LangGraph、AutoGen、CrewAI 在编排模型上的核心差异是什么？"
+  },
+  {
+    "qid": "q3",
+    "question": "2025-2026 国内大厂 AI Agent 实习岗的能力要求有什么变化？"
+  },
+  {
+    "qid": "q4",
+    "question": "Deep Research 类产品在 2026 年的商业化现状如何？"
+  },
+  {
+    "qid": "q5",
+    "question": "ChatGPT Deep Research、Perplexity、Genspark 三者的产品定位与差异是什么？"
+  }
+]

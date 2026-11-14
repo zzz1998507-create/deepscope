@@ -1,0 +1,17 @@
+# 密钥（绝不提交）
+.env
+
+# Spike 产物
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 工具杂项
+.pytest_cache/
+.DS_Store
+.idea/
+.vscode/
