@@ -237,6 +237,7 @@ class SearchHit:
     title: str
     url: str
     snippet: str
+    raw_content: str = ""
 
 
 async def tavily_search(client: httpx.AsyncClient, query: str, max_results: int = 5) -> list[SearchHit]:
@@ -245,12 +246,14 @@ async def tavily_search(client: httpx.AsyncClient, query: str, max_results: int 
         raise RuntimeError("未配置 TAVILY_API_KEY")
     resp = await client.post(
         "https://api.tavily.com/search",
-        json={"api_key": key, "query": query, "max_results": max_results, "search_depth": "basic"},
-        timeout=httpx.Timeout(20.0),
+        json={"api_key": key, "query": query, "max_results": max_results,
+              "search_depth": "basic", "include_raw_content": True},
+        timeout=httpx.Timeout(30.0),
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Tavily 返回 {resp.status_code}: {resp.text[:300]}")
-    return [SearchHit(r.get("title", ""), r.get("url", ""), r.get("content", ""))
+    return [SearchHit(r.get("title", ""), r.get("url", ""), r.get("content", ""),
+                      r.get("raw_content") or "")
             for r in resp.json().get("results", []) if r.get("url")]
 
 
@@ -375,6 +378,7 @@ class SpikeState:
     evidence: list = field(default_factory=list)         # [{id, claim, quote, url, title}]
     dropped_quotes: list = field(default_factory=list)   # 机械校验未通过（伪造/改写）的候选
     report: str | None = None
+    report_truncated: bool = False
     verification: dict | None = None
     steps: list = field(default_factory=list)            # [StepRecord]
     cost_rmb: float = 0.0
@@ -390,7 +394,7 @@ class SpikeState:
     def from_dict(cls, d: dict) -> "SpikeState":
         st = cls(qid=d["qid"], question=d["question"])
         for k in ("plan", "search_results", "pages", "evidence", "dropped_quotes",
-                  "report", "verification", "cost_rmb", "tokens", "error"):
+                  "report", "report_truncated", "verification", "cost_rmb", "tokens", "error"):
             if k in d:
                 setattr(st, k, d[k])
         st.steps = [StepRecord(**s) if isinstance(s, dict) else s for s in d.get("steps", [])]
@@ -450,6 +454,7 @@ class Workspace:
             "tokens": state.tokens,
             "steps": [s.to_dict() if isinstance(s, StepRecord) else s for s in state.steps],
             "evidence_count": len(state.evidence),
+            "report_truncated": state.report_truncated,
             "dropped_quotes": len(state.dropped_quotes),
             "invalid_citations": len(verification.get("invalid_citations") or []),
             "citation_accuracy": verification.get("accuracy"),
@@ -501,13 +506,13 @@ async def step_search(state: SpikeState, ctx: dict) -> None:
 
 async def step_fetch(state: SpikeState, ctx: dict) -> None:
     client: httpx.AsyncClient = ctx["client"]
-    # 去重 URL，保留首个标题
-    seen: dict[str, str] = {}
+    # 去重 URL，保留首个标题和 Tavily 正文（抓取失败时的兜底）
+    seen: dict[str, tuple[str, str]] = {}
     for sr in state.search_results:
         for h in sr["hits"]:
             url = (h.get("url") or "").strip()
             if url.startswith(("http://", "https://")) and url not in seen:
-                seen[url] = h.get("title", "")
+                seen[url] = (h.get("title", ""), h.get("raw_content") or "")
     urls = list(seen.items())[:MAX_PAGES]
     if not urls:
         raise RuntimeError("搜索阶段未得到任何 URL，检查搜索 Key 或网络")
@@ -515,11 +520,15 @@ async def step_fetch(state: SpikeState, ctx: dict) -> None:
     sem = asyncio.Semaphore(FETCH_CONCURRENCY)
     jina_state: dict = {"jina_ok": True}
 
-    async def one(item: tuple[str, str]) -> dict:
-        url, title = item
+    async def one(item: tuple[str, tuple[str, str]]) -> dict:
+        url, (title, raw_content) = item
         async with sem:
             content, channel = await fetch_page(client, url, jina_state)
-            log(f"  fetch[{channel}] {url[:70]} → {len(content or '')} 字符")
+            if not content and len(raw_content) >= 200:
+                content, channel = raw_content[:MAX_PAGE_CHARS], "tavily_raw"
+                log(f"  fetch[tavily_raw] {url[:70]} → {len(content)} 字符（抓取失败，用搜索正文兜底）")
+            else:
+                log(f"  fetch[{channel}] {url[:70]} → {len(content or '')} 字符")
             return {"url": url, "title": title, "channel": channel, "content": content}
 
     results = await asyncio.gather(*[one(item) for item in urls])
@@ -590,28 +599,51 @@ async def step_extract(state: SpikeState, ctx: dict) -> None:
 WRITE_PROMPT = """你是深度研究分析师。基于给定的证据列表（每条有编号、论断、原文引用、来源）写一份中文研究报告。
 
 硬性要求：
-1. 每个事实性论断后紧跟引用标记，如 [e3] 或 [e3][e7]；分析性过渡句可不标；
-2. 只能引用给定证据，严禁编造证据之外的任何事实（时间、数字、产品名、观点）；
-3. 证据不足以回答的子问题，如实写"证据不足"，不要硬编；
-4. 结构：标题 → 摘要（3-5 句，带引用）→ 分节正文（按子问题组织）→ 证据列表 → 研究局限；
-5. 引用标记必须使用证据的 id（e1、e2…），不得自造编号。"""
+1. 每个事实性论断单独成句，句子结束后标注引用，如 [e3]；同一句最多 2 个引用标记；
+2. 只在该句内容能被引用直接支撑时标注；不要把多个来源的要点合并成一句长句；
+3. 只能引用给定证据，严禁编造证据之外的任何事实（时间、数字、产品名、观点）；
+4. 证据不足以回答的子问题，如实写"证据不足"，不要用部分证据拼凑结论；
+5. 结构：标题 → 摘要（≤5 句）→ 3-5 节正文 → 研究局限；不要输出证据列表（evidence.json 已单独保存）；
+6. 全文控制在 2500-3500 中文字以内。"""
+
+
+def _select_evidence(evidence: list[dict], max_total: int = 30,
+                     max_per_source: int = 4) -> list[dict]:
+    """控制写入阶段的证据规模，同时保证来源多样性。"""
+    used: dict[str, int] = {}
+    selected = []
+    for e in evidence:
+        url = e["url"]
+        if used.get(url, 0) >= max_per_source:
+            continue
+        selected.append(e)
+        used[url] = used.get(url, 0) + 1
+        if len(selected) >= max_total:
+            break
+    return selected
 
 
 async def step_write(state: SpikeState, ctx: dict) -> None:
     llm: LLMProvider = ctx["llm"]
+    selected = _select_evidence(state.evidence)
     evidence_text = "\n\n".join(
         f"[{e['id']}] 来源：{e['title']}（{e['url']}）\n论断：{e['claim']}\n原文：{e['quote']}"
-        for e in state.evidence)
+        for e in selected)
     sub_qs = "\n".join(f"- {q}" for q in state.plan["sub_questions"])
     messages = [
         {"role": "system", "content": "你是严谨的研究分析师，只依据给定证据写作。"},
         {"role": "user", "content":
             f"研究问题：{state.question}\n\n需覆盖的子问题：\n{sub_qs}\n\n"
-            f"证据列表：\n{evidence_text}\n\n{WRITE_PROMPT}"},
+            f"证据列表（共 {len(selected)} 条）：\n{evidence_text}\n\n{WRITE_PROMPT}"},
     ]
     res = await llm.chat(messages, temperature=0.4, max_tokens=8192)
     state.add_tokens(res)
     state.report = res.text
+    tail = (res.text or "").rstrip()
+    state.report_truncated = bool(tail) and tail[-1] not in "。！？.!?）)"
+    if state.report_truncated:
+        log(f"  ! write 输出可能被截断（末尾：{tail[-40:]!r}），考虑限长或分节写作")
+    log(f"  write 使用证据 {len(selected)}/{len(state.evidence)} 条")
 
 
 VERIFY_PROMPT = """你是严格的引用审查员（LLM judge）。逐条检查本段报告中每处 [e#] 引用标记是否真正支持它所在位置的论断。

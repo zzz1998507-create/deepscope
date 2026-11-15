@@ -41,9 +41,9 @@ PostgreSQL 16 + pgvector
 ## 当前状态
 
 - Spike 六步流水线已跑通：`plan → search → fetch → extract → write → verify`
-- q1 第三轮：54 条证据、9 个来源、引用准确率 **83.3% / 98.9%**、成本 ¥0.24、耗时 282 秒
-- 已实现：抓取正文校验、伪造 quote 机械闸门、verify 按引用数分批、校验覆盖率指标
-- 待完成：q1 人工抽查、q2-q5、整体 Go/No-Go
+- **W1 全量重跑完成（deepseek-chat）**：五题 strict 引用准确率 74.1%-90.4%，全部超过 70% Go 线；五题合计 354 秒 / ¥0.47
+- 已实现：抓取正文校验、伪造 quote 机械闸门、verify 按引用数分批、校验覆盖率指标、Tavily 正文兜底、checkpoint 中断恢复
+- Go/No-Go 决策：**待用户人工抽查 q2/q3 后确认**
 
 ## 快速开始（Spike）
 

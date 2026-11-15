@@ -57,6 +57,37 @@
 5. **状态对账**：Python 执行态优先；Java 未 ack 的 cancel/resume 优先；`last_event_seq` 以 Python 为准；`budget_used` 双口径（Java 结算、Python 硬停），差异告警不阻塞。
 - **后续验证**：W3 做 kill/restore 与审批暂停/恢复测试；W5 用 contract tests 同时跑 mock 和真实 Java。
 
+### 问题：deepseek-flash 推理 token 挤占输出预算，报告 40 字截断、accuracy 塌方（已定位）
+- **现象**：`completion_tokens=8192` 用满但报告只有 40 字（"# ChatGPT Deep Research、Perplexity"），verify 无判定可用。
+- **根因**：deepseek-flash 为推理型模型，输出预算大部分被思考过程占用，正文没空间；与 prompt 无关。
+- **处理**：改用非推理模型 `deepseek-chat`；write 后检测截断（末尾无句末标点则告警），meta.json 记录 `report_truncated`。
+- **教训**：指标塌方先查模型行为再改 prompt；推理模型的 token 计量和输出预算需要单独策略。
+- **后续验证**：W2 Provider 层对推理模型单独设 output 上限和截断检测。
+
+### 决策：q5 证据来源缺失（25 结果只抓到 2 页）→ Tavily raw_content 兜底
+- **问题**：q5 搜索 25 条结果只成功抓取 2 个页面，ChatGPT Deep Research 完全无来源，strict 69.6% 卡在 Go 线下。
+- **修复**：Tavily 搜索请求加 `include_raw_content=true`；抓取失败时用搜索返回的正文兜底（channel=tavily_raw），机械闸门同样对其校验。
+- **效果**：q5 页面 2→15、证据 12→50、strict 69.6%→88.9%。
+- **后续验证**：W2 搜索 Provider 默认开启 raw_content；观测 Tavily 免费额度消耗速度。
+
+### 决策：write 阶段证据选择与写作约束
+- **问题**：write 把多个来源要点合并成一句长句（一句挂 4-5 个引用），judge 逐条判定必然 partial，strict 被系统性压低。
+- **修复**：`_select_evidence` 控制规模（≤30 条、每来源 ≤4 条保证多样性）；prompt 要求一句一事实、每句 ≤2 个引用、全文 2500-3500 字、不再输出证据列表。
+- **代价**：报告信息密度降低，深度略减；换取引用可核验性。
+- **后续验证**：q1-q5 全量重跑后 strict 是否整体回升。
+
+### 结果：W1 Spike 全量重跑（deepseek-chat + 最新代码，2026-11-15）
+| qid | strict | lenient | 证据 | 来源 | 耗时 | 成本 | 校验覆盖 | 丢弃伪造 |
+|---|---|---|---|---|---|---|---|---|
+| q1 | 86.2% | 100% | 65 | 14 | 74s | ¥0.097 | 100% | 19 |
+| q2 | 75.0% | 100% | 67 | 12 | 63s | ¥0.094 | 91.2% | 4 |
+| q3 | 74.1% | 100% | 58 | 11 | 73s | ¥0.094 | 87.1% | 8 |
+| q4 | 90.4% | 96.2% | 55 | 10 | 77s | ¥0.089 | 85.2% | 5 |
+| q5 | 88.9% | 100% | 50 | 9 | 67s | ¥0.094 | 96.4% | 4 |
+- 五题合计 354s / ¥0.47；最低 strict 74.1% > 70% Go 线。
+- 中断恢复现场验证：全量重跑被 kill 后，重跑（无 --fresh）自动 skip 已完成步骤续跑成功。
+- 超时降级现场验证：trafilatura TimeoutError → tavily_raw 兜底多次生效。
+
 ---
 
 ## 2026-11-14
