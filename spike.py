@@ -453,6 +453,7 @@ class Workspace:
             "dropped_quotes": len(state.dropped_quotes),
             "invalid_citations": len(verification.get("invalid_citations") or []),
             "citation_accuracy": verification.get("accuracy"),
+            "verification_coverage": verification.get("verification_coverage"),
             "coverage": verification.get("coverage"),
         }
         atomic_write_json(self.dir / "meta.json", meta)
@@ -505,7 +506,7 @@ async def step_fetch(state: SpikeState, ctx: dict) -> None:
     for sr in state.search_results:
         for h in sr["hits"]:
             url = (h.get("url") or "").strip()
-            if url and url not in seen:
+            if url.startswith(("http://", "https://")) and url not in seen:
                 seen[url] = h.get("title", "")
     urls = list(seen.items())[:MAX_PAGES]
     if not urls:
@@ -552,7 +553,7 @@ async def step_extract(state: SpikeState, ctx: dict) -> None:
                         f"研究问题：{state.question}\n\n"
                         f"来源：{page['title']}\n{page['url']}\n\n正文：\n{page['content']}\n\n"
                         f"{EXTRACT_PROMPT}"},
-                ], max_tokens=2048)
+                ], max_tokens=4096)
             except Exception as e:
                 log(f"  extract 失败 page#{idx} {page['url'][:60]}: {e}")
                 return []
@@ -648,15 +649,41 @@ def calc_accuracy(checks: list[dict]) -> dict:
     }
 
 
-def _chunks(text: str, max_chars: int = 4000) -> list[str]:
-    """按段落切分报告，保证每批引用数在 LLM 单次输出能装下的范围内。"""
-    chunks, cur, size = [], [], 0
+def _split_units(text: str, max_marks: int) -> list[str]:
+    """把文本切成引用标记数不超过 max_marks 的单元（优先按行，行内超限按句）。"""
+    units = []
     for line in text.split("\n"):
-        if size + len(line) + 1 > max_chars and cur:
+        if len(re.findall(r"\[e\d+\]", line)) <= max_marks:
+            units.append(line)
+            continue
+        buf = ""
+        for sent in re.split(r"(?<=[。！？!?])\s+", line):
+            if buf and len(re.findall(r"\[e\d+\]", buf + sent)) > max_marks:
+                units.append(buf)
+                buf = sent
+            else:
+                buf = f"{buf} {sent}" if buf else sent
+        if buf:
+            units.append(buf)
+    return units
+
+
+def _chunks_by_marks(text: str, max_marks: int = 15,
+                     max_chars: int = 3500) -> list[str]:
+    """按引用标记数切块。
+
+    verify 的输出 token 与判定条数成正比：按字符切会切出 65 处标记的批次，
+    模型输出直接撞上限。按标记数切才能保证每批都判得完。
+    """
+    chunks, cur, marks, size = [], [], 0, 0
+    for unit in _split_units(text, max_marks):
+        n = len(re.findall(r"\[e\d+\]", unit))
+        if cur and (marks + n > max_marks or size + len(unit) + 1 > max_chars):
             chunks.append("\n".join(cur))
-            cur, size = [], 0
-        cur.append(line)
-        size += len(line) + 1
+            cur, marks, size = [], 0, 0
+        cur.append(unit)
+        marks += n
+        size += len(unit) + 1
     if cur:
         chunks.append("\n".join(cur))
     return chunks
@@ -687,29 +714,44 @@ async def step_verify(state: SpikeState, ctx: dict) -> None:
     llm: LLMProvider = ctx["llm"]
     ev_by_id = {e["id"]: e for e in state.evidence}
     report = state.report or ""
-    chunks = _chunks(report)
+    total_marks = len(re.findall(r"\[e\d+\]", report))
     checks: list[dict] = []
 
-    for bi, chunk in enumerate(chunks):
+    async def verify_chunk(chunk: str, depth: int = 0, label: str = "") -> list[dict]:
         cited = sorted(set(re.findall(r"\[(e\d+)\]", chunk)), key=lambda x: int(x[1:]))
         # 只把本批实际引用的证据发给 judge，省 token 也减少干扰
         ev_text = "\n\n".join(
             f"[{i}] {ev_by_id[i]['claim']} | 原文：{ev_by_id[i]['quote'][:200]}"
             for i in cited if i in ev_by_id)
+        part: list[dict] = []
         try:
             data, res = await llm.chat_json([
                 {"role": "system", "content": "你是严格的引用审查员，只输出 JSON。"},
                 {"role": "user", "content":
                     f"研究问题：{state.question}\n\n本批引用涉及的证据：\n{ev_text}\n\n"
                     f"报告片段：\n{chunk}\n\n{VERIFY_PROMPT}"},
-            ], max_tokens=4096)
+            ], max_tokens=6144)
+            state.add_tokens(res)
+            part = _normalize_checks(data)
         except Exception as e:
-            log(f"  ! verify 批次 {bi + 1} 失败: {type(e).__name__}: {e}")
-            continue
-        state.add_tokens(res)
-        part = _normalize_checks(data)
-        checks.extend(part)
-        log(f"  verify 批次 {bi + 1}/{len(chunks)}: 引用 {len(cited)} 个 id → {len(part)} 条判定")
+            log(f"  ! verify 批次 {label} 失败: {type(e).__name__}: {e}")
+
+        expected = len(re.findall(r"\[e\d+\]", chunk))
+        # 判定数不足一半视为输出溢出/退化：拆半重试一次
+        if len(part) < expected * 0.5 and depth == 0 and len(chunk) > 800:
+            log(f"  ! 批次 {label} 仅 {len(part)}/{expected} 条判定，拆半重试")
+            mid = len(chunk) // 2
+            cut = chunk.rfind("\n", 0, mid)
+            if cut < 200:
+                cut = mid
+            return (await verify_chunk(chunk[:cut], depth + 1, f"{label}a")
+                    + await verify_chunk(chunk[cut:], depth + 1, f"{label}b"))
+        log(f"  verify 批次 {label}: 引用 {len(cited)} 个 id / {expected} 处标记 → {len(part)} 条判定")
+        return part
+
+    chunks = _chunks_by_marks(report, max_marks=15, max_chars=3500)
+    for bi, chunk in enumerate(chunks):
+        checks.extend(await verify_chunk(chunk, label=str(bi + 1)))
 
     coverage = None
     try:
@@ -728,16 +770,23 @@ async def step_verify(state: SpikeState, ctx: dict) -> None:
     invalid = sorted({c for c in re.findall(r"\[(e\d+)\]", report) if c not in ev_by_id},
                      key=lambda x: int(x[1:]))
     accuracy = calc_accuracy(checks)
+    verified_ratio = round(len(checks) / total_marks, 3) if total_marks else None
     state.verification = {
         "checks": checks,
         "coverage": coverage,
         "invalid_citations": invalid,
+        "total_marks": total_marks,
+        "verified_marks": len(checks),
+        "verification_coverage": verified_ratio,
         "accuracy": accuracy,
     }
     if checks:
         log(f"  verify 引用准确率: strict={accuracy['strict']} lenient={accuracy['lenient']} "
             f"({accuracy['supported']}支持/{accuracy['partial']}部分/"
-            f"{accuracy['unsupported']}不支持)，无效编号 {len(invalid)} 个")
+            f"{accuracy['unsupported']}不支持)，无效编号 {len(invalid)} 个，"
+            f"校验覆盖率 {verified_ratio:.0%}")
+        if verified_ratio is not None and verified_ratio < 0.7:
+            log("  ! 校验覆盖率低于 70%，Accuracy 代表性不足，建议检查 verify 批次日志")
     else:
         log(f"  ! verify 未得到任何有效判定，accuracy 不可用（无效编号 {len(invalid)} 个）")
 
