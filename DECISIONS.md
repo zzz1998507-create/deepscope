@@ -106,6 +106,12 @@
 - **教训**：judge 的输入完备性直接决定判定质量；人工抽查的价值不只是校准数字，更是定位 judge 的输入盲区。
 - **后续验证**：W4 评测集落地时，verify 输入统一为"完整证据对象"（id/title/url/claim/quote），并抽查 judge 的 claim 摘录句界是否准确。
 
+### 决策：W1 Spike 正式 Go（2026-11-15，用户拍板）
+- **数据**：五题 strict 76.7%-91.2%（Go 线 70%），合计 336s / ¥0.46；步骤可回放、超时降级与中断恢复均现场验证。
+- **人工抽查**：8 处全部有效，两次抽查定位真问题（多引用句偏松、judge 输入缺陷），修复后 q3 +9.4pp。
+- **Spike 五大修复**（面试叙事素材）：trafilatura API 误用、伪造 quote 机械闸门、verify 按引用分批、推理模型输出截断、judge 输入完备性。
+- **进入 W2**：LangGraph 状态机 + 证据库 + JavaBusinessClient(LocalMock) + Python 3.12 迁移；用户同步补 Python 基础（5 天 × 1.5h 最小集合），学习材料 docs/SPIKE_GUIDE.md。
+
 ---
 
 ## 2026-11-14
