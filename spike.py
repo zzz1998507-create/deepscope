@@ -648,8 +648,11 @@ async def step_write(state: SpikeState, ctx: dict) -> None:
 
 VERIFY_PROMPT = """你是严格的引用审查员（LLM judge）。逐条检查本段报告中每处 [e#] 引用标记是否真正支持它所在位置的论断。
 
-判定标准：
-- supported：引用证据的 claim/quote 与该论断一致且足以支撑；
+硬性要求：
+1. claim 摘录范围：只摘录紧邻该 [e#] 标记的那一句（以句号/换行分界），不要合并相邻句子；
+2. 判断时同时参考证据的来源标题：来源本身的信息（如公司名、平台名）可以作为支撑，但必须来自给定的 title/url 字段；
+3. 判定标准：
+- supported：引用证据的 claim/quote/title 与该论断一致且足以支撑；
 - partial：部分支撑（论断了多个要点，证据只覆盖其中一部分）；
 - unsupported：证据与该论断无关、矛盾，或证据不足以得出该论断。
 
@@ -753,7 +756,8 @@ async def step_verify(state: SpikeState, ctx: dict) -> None:
         cited = sorted(set(re.findall(r"\[(e\d+)\]", chunk)), key=lambda x: int(x[1:]))
         # 只把本批实际引用的证据发给 judge，省 token 也减少干扰
         ev_text = "\n\n".join(
-            f"[{i}] {ev_by_id[i]['claim']} | 原文：{ev_by_id[i]['quote'][:200]}"
+            f"[{i}] 来源：{ev_by_id[i]['title']}（{ev_by_id[i]['url']}）\n"
+            f"论断：{ev_by_id[i]['claim']} | 原文：{ev_by_id[i]['quote'][:200]}"
             for i in cited if i in ev_by_id)
         part: list[dict] = []
         try:
