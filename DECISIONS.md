@@ -5,6 +5,54 @@
 
 ---
 
+## 2026-11-15
+
+### 决策：Java BFF 从"W6 可选"改为"W5 必做"（目标修正）
+- **背景**：用户的真实求职目标是 Java 高并发控制面 + Python Agent 执行面；早期摘要中"Java BFF 可选、时间不够可砍"的假设不再成立。
+- **选择**：Java 控制面负责认证、任务生命周期、幂等/限流、SSE 长连接扇出与 `Last-Event-ID` 重放、k6 压测；Python 执行面负责 Agent Runtime、checkpoint（执行真相源）、评测与可观测性。两者用 `task_id + seq` 对账，Java 不复刻 Agent 内部状态。
+- **代价**：预计增加 20-25 小时；压缩前端交互与评测集规模（维持 15-20 题），Redis 队列降为可选。
+- **后续验证**：W5 末 BFF v1 跑通；W6 用 mock agent 模式压测：500 并发 SSE、100 次/秒提交、取消/重试幂等、断线重放无缺口。
+
+### 问题：verify 按字符切块导致输出溢出，99 处引用只校验了 34 处（已修复）
+- **现象**：批次 1 包含 65 处引用标记，两次调用输出都撞 4096 token 上限，只返回 1 条判定；最终 accuracy 0.882 仅基于 34/99 处引用，代表性不足。
+- **根因**：judge 的判定条数与输出 token 大致成正比，"按字符切块"不等于"按判定数切块"；且当前模型可能包含推理 token，进一步挤占输出预算。
+- **修复**：`_chunks_by_marks()` 按引用标记数切块（每批 ≤15 处，实测 7 批）；verify `max_tokens` 提到 6144；判定数不足 50% 时自动拆半重试；新增 `verification_coverage` 指标，低于 70% 打警告。
+- **代价**：verify 从 2 次调用变为 7 次，成本预计增加 ¥0.02-0.04。
+- **后续验证**：重跑 q1，校验覆盖率应 ≥90%，每批 10-15 条判定。
+
+### 决策：extract 输出上限从 2048 提到 4096
+- **问题**：上轮至少一次 extract 输出正好 2048 token，存在 JSON 被截断、claims 静默丢失的风险。
+- **选择**：上限提到 4096；同时机械闸门保证截断导致的坏 quote 不会进入证据库。
+- **代价**：仅在模型实际用满时才多花钱。
+
+### 决策：前端选 React + Ant Design 5（Vue 3 评估后放弃）
+- **问题**：用户前端薄弱，React 和 Vue 都不熟，选哪个？
+- **候选方案**：A. React 18/19 + Ant Design 5；B. Vue 3 + Element Plus。
+- **选择**：A。两个都不熟时，"熟悉度"不构成理由；AntD 对 Timeline / Drawer / Table / Form 的覆盖、AI 代码生成质量、大厂后台生态更优，且原计划就是它。
+- **代价**：需要 4-6 小时补 React 基础（组件、useState、useEffect、SSE）。
+- **后续验证**：W3 末写一个最小"列表 + SSE 日志"demo；若明显不适应，W4 前仍可换 Vue，W4 后不换。
+
+### 决策：Java 控制面技术栈
+- **选择**：Java 21 LTS + Spring Boot 3.x + Spring MVC（虚拟线程 + `SseEmitter`）+ Spring Security/JWT + Spring Data JPA + Flyway + Bucket4j + WebClient + Actuator/Micrometer + Maven。
+- **不选**：WebFlux（与 JPA 阻塞模型别扭、复杂度高）、Spring Cloud/Kafka（7 周内不需要）、MyBatis（当前 SQL 简单，JPA 省代码；若后续更熟 MyBatis 可替换，但禁止两套混用）。
+- **代价**：虚拟线程下的 SSE 连接管理、背压需要自己验证；W6 才能拿到压测数据。
+- **后续验证**：W5 BFF v1 跑通；W6 用 k6 + mock agent 压测。
+
+### 决策：Python 工具链
+- **选择**：Python 3.12（W2 起）+ FastAPI/Uvicorn + LangGraph + `AsyncPostgresSaver` + SQLAlchemy 2 async/asyncpg + Alembic + Ruff + Pyright + pytest/pytest-asyncio/respx；日常编辑器用 Cursor，Java 用 IDEA。
+- **代价**：Spike 当前运行在 3.14，W2 需要新建 3.12 venv 并迁移依赖。
+- **后续验证**：W2 用 3.12 跑通 LangGraph checkpoint 与断点恢复。
+
+### 决策：W2-W5 集成设计的五条修正
+1. **JavaBusinessClient Protocol + LocalMock**：W2-W3 用本地 mock 跑通 context/library/usage/approval，W5 只替换 HTTP 实现，状态机不动。
+2. **审批用 `interrupt()` + `Command(resume=...)`**：`create_approval` 非阻塞返回 approval_id，节点随后 interrupt；恢复时节点会重跑，interrupt 前的副作用必须幂等。
+3. **usage 幂等键 `(task_id, call_id)`**：`call_id` 对应每次真实 provider 请求（UUID），重试也换新；`logical_call_id` 用于聚合重试。
+4. **事件 per-task seq**：Python 生成 seq；Java `task_events` 持久化并扇出；Python 保留 outbox 防 Java 宕机丢事件；前端用 `Last-Event-ID` 重放。
+5. **状态对账**：Python 执行态优先；Java 未 ack 的 cancel/resume 优先；`last_event_seq` 以 Python 为准；`budget_used` 双口径（Java 结算、Python 硬停），差异告警不阻塞。
+- **后续验证**：W3 做 kill/restore 与审批暂停/恢复测试；W5 用 contract tests 同时跑 mock 和真实 Java。
+
+---
+
 ## 2026-11-14
 
 ### 决策：Spike 阶段刻意不用 LangGraph，用裸 async 函数验证内容质量
