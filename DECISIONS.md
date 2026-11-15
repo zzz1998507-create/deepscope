@@ -39,9 +39,15 @@
 - **后续验证**：W5 BFF v1 跑通；W6 用 k6 + mock agent 压测。
 
 ### 决策：Python 工具链
-- **选择**：Python 3.12（W2 起）+ FastAPI/Uvicorn + LangGraph + `AsyncPostgresSaver` + SQLAlchemy 2 async/asyncpg + Alembic + Ruff + Pyright + pytest/pytest-asyncio/respx；日常编辑器用 Cursor，Java 用 IDEA。
+- **选择**：Python 3.12（W2 起）+ FastAPI/Uvicorn + LangGraph + `AsyncPostgresSaver` + SQLAlchemy 2 async/asyncpg + Alembic + Ruff + Pyright + pytest/pytest-asyncio/respx。
 - **代价**：Spike 当前运行在 3.14，W2 需要新建 3.12 venv 并迁移依赖。
 - **后续验证**：W2 用 3.12 跑通 LangGraph checkpoint 与断点恢复。
+
+### 决策：开发工具分工固定为 PyCharm / Cursor / IDEA
+- **选择**：Python 侧用 **PyCharm**，前端用 **Cursor**，Java 侧用 **IntelliJ IDEA**；三者不混用。
+- **理由**：PyCharm 的 Python 异步调试、pytest、解释器管理最成熟；Cursor 的 AI 补全最适合生成和修改 React 组件；IDEA 的 Spring Boot / Maven / 数据库工具最顺。
+- **代价**：三个 IDE 会增加切换成本；用统一 Git 工作流和同一仓库结构缓解。PyCharm Community 不含数据库/HTTP 工具，数据库看 DBeaver，接口调试用 Bruno/Insomnia。
+- **后续验证**：W2 用 PyCharm 跑通 LangGraph checkpoint；W4 用 Cursor 写前端；W5 用 IDEA 跑 BFF。
 
 ### 决策：W2-W5 集成设计的五条修正
 1. **JavaBusinessClient Protocol + LocalMock**：W2-W3 用本地 mock 跑通 context/library/usage/approval，W5 只替换 HTTP 实现，状态机不动。

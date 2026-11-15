@@ -136,6 +136,16 @@ Python 3.12 + FastAPI + Uvicorn + LangGraph + `langgraph-checkpoint-postgres` + 
 
 PostgreSQL 16 + pgvector；Redis 7 可选；Docker + Docker Compose；Nginx；Git + GitHub；GitHub Actions（W5+）。
 
+### 开发工具
+
+| 层 | 工具 | 用途 |
+|---|---|---|
+| Python | **PyCharm** | Agent 开发、异步调试、pytest、venv 管理 |
+| 前端 | **Cursor** | React 组件生成与修改、SSE 调试 |
+| Java | **IntelliJ IDEA** | Spring Boot、Maven、数据库工具 |
+| API / DB | Bruno / Insomnia、DBeaver | 调内部接口、查看任务/事件/证据表 |
+| 压测 | k6 | W6 控制面并发压测 |
+
 ### 外部 AI 服务
 
 DeepSeek（LLM 主力）、SiliconFlow BGE-M3（Embedding）、Tavily（搜索主力）、博查（搜索降级）、Jina Reader（可选）、trafilatura（本地正文抽取兜底）。
